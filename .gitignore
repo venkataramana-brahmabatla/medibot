@@ -1,0 +1,29 @@
+# Python environment and bytecode
+venv/
+.venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Environment files
+.env
+.env.local
+*.env
+
+# IDE / Editor configs
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Logs and generated runtime databases
+*.log
+*.sqlite3
+data/qdrant_db/
+data/uploads/
+data/cache/
+/resources/

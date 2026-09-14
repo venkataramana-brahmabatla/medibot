@@ -1,0 +1,61 @@
+# ==============================================================================
+# MediBot Requirements: Advanced Hybrid RAG, Docling Ingestion & RBAC System
+# Using: Groq API (openai/gpt-oss-20b model)
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# Phase 0: Core Config & Utilities
+# ------------------------------------------------------------------------------
+pydantic>=2.7.0           # Data validation & settings models
+pydantic-settings>=2.2.0  # Load settings from .env file
+python-dotenv>=1.0.1      # Read .env files
+rich>=13.7.0              # Pretty terminal output (colored logs, tables)
+
+# ------------------------------------------------------------------------------
+# Phase 1: Document Ingestion & Hierarchical Chunking
+# ------------------------------------------------------------------------------
+docling>=2.0.0            # Structural PDF parsing (headings, tables, code blocks)
+docling-core>=2.0.0       # Core data models for Docling
+
+# ------------------------------------------------------------------------------
+# Phase 2: Vector Store & Hybrid Search (Dense + BM25)
+# ------------------------------------------------------------------------------
+qdrant-client>=1.12.0     # Qdrant vector database client (supports in-memory mode)
+fastembed>=0.4.0          # Fast embedding models + BM25 sparse vectors (no GPU needed)
+
+# ------------------------------------------------------------------------------
+# Phase 3: Reranking (Cross-Encoder) -- will be installed in a later phase
+# ------------------------------------------------------------------------------
+sentence-transformers>=3.0.0  # Cross-encoder reranking model
+torch>=2.0.0                  # PyTorch runtime (required by sentence-transformers)
+
+# ------------------------------------------------------------------------------
+# Phase 4: SQL RAG
+# ------------------------------------------------------------------------------
+sqlparse>=0.5.0           # Parse & clean LLM-generated SQL before executing
+tabulate>=0.9.0           # Format SQL query results as readable tables
+
+# ------------------------------------------------------------------------------
+# Phase 5: LLM API (Groq)
+# ------------------------------------------------------------------------------
+groq>=0.15.0              # Groq API client for openai/gpt-oss-20b
+
+# ------------------------------------------------------------------------------
+# Phase 5: Backend (FastAPI)
+# ------------------------------------------------------------------------------
+fastapi>=0.115.0          # Web framework for the /login, /chat, /collections endpoints
+uvicorn[standard]>=0.30.0 # ASGI server to run FastAPI
+python-multipart>=0.0.12  # Required for form data in FastAPI (login form)
+
+# ------------------------------------------------------------------------------
+# Phase 5: Authentication & RBAC
+# ------------------------------------------------------------------------------
+PyJWT>=2.9.0              # Create & verify JWT tokens for session management
+passlib[bcrypt]>=1.7.4    # Password hashing utilities
+bcrypt>=4.0.0             # bcrypt algorithm for passlib
+
+# ------------------------------------------------------------------------------
+# Testing & Dev Utilities
+# ------------------------------------------------------------------------------
+pytest>=8.0.0             # Test runner for unit tests
+requests>=2.31.0          # HTTP client (useful for testing API endpoints manually)
