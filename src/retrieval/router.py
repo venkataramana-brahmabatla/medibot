@@ -8,24 +8,16 @@ Routes user questions to either:
   2. Hybrid RAG (Qdrant vector store PDF documents + reranking)
 """
 
-import re
 from typing import Any, Optional
 from rich.console import Console
+from langsmith import traceable
 
-from src.config import SQL_RAG_ROLES
+from src.agents.contracts import RouteTarget
+from src.agents.supervisor import SupervisorAgent
 from src.retrieval.sql_rag import SQLRAG
 from src.retrieval.hybrid_rag import HybridRAGPipeline
 
 console = Console()
-
-# Keywords indicating analytical / numerical database questions
-SQL_KEYWORDS = [
-    "claim", "claims", "maintenance", "ticket", "tickets", "fault",
-    "escalated", "how many claims", "total amount", "approved amount",
-    "claimed amount", "insurer", "diagnosis code", "open tickets",
-    "equipment category", "ticket count", "maintenance tickets",
-]
-
 
 class QueryRouter:
     """
@@ -36,27 +28,39 @@ class QueryRouter:
         self,
         sql_rag: Optional[SQLRAG] = None,
         hybrid_rag: Optional[HybridRAGPipeline] = None,
+        supervisor: Optional[SupervisorAgent] = None,
     ):
         self.sql_rag = sql_rag or SQLRAG()
         self.hybrid_rag = hybrid_rag or HybridRAGPipeline()
+        self.supervisor = supervisor or SupervisorAgent()
 
-    def is_sql_question(self, question: str) -> bool:
-        """
-        Determines whether a question is analytical / SQL database related.
-        """
-        q_lower = question.lower()
-        return any(kw in q_lower for kw in SQL_KEYWORDS)
-
+    @traceable(name="query_router", run_type="chain")
     def route_and_execute(self, question: str, role: str) -> dict[str, Any]:
         """
         Routes the question to the appropriate RAG engine and returns result.
         """
-        if self.is_sql_question(question):
+        decision = self.supervisor.decide(question=question, role=role)
+        if decision.target == RouteTarget.SQL:
             console.print("🔀 [bold magenta]Router Direction:[/bold magenta] SQL RAG (Database Engine)")
             return self.sql_rag.sql_rag_chain(question=question, role=role)
-        else:
+        if decision.target == RouteTarget.DOCUMENT:
             console.print("🔀 [bold magenta]Router Direction:[/bold magenta] Hybrid RAG (Document Vector Store)")
             return self.hybrid_rag.query(question=question, role=role)
+        if decision.target == RouteTarget.CLARIFICATION:
+            return {
+                "answer": "Could you clarify whether you need information from hospital documents or operational analytics?",
+                "sources": [],
+                "retrieval_type": "supervisor",
+                "role": role,
+                "status": "clarification_required",
+            }
+        return {
+            "answer": "I’m unable to route that request safely.",
+            "sources": [],
+            "retrieval_type": "supervisor",
+            "role": role,
+            "status": "supervisor_refusal",
+        }
 
 
 # Verification CLI

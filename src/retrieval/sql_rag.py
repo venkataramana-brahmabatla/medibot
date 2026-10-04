@@ -24,9 +24,10 @@ from typing import Any, Optional
 from rich.console import Console
 from rich.panel import Panel
 from rich.syntax import Syntax
-from groq import Groq
+from langsmith import traceable
 
 from src.config import settings, SQL_RAG_ROLES, ROLE_COLLECTIONS
+from src.observability.tracing import create_chat_client, llm_chat_completion
 
 console = Console()
 
@@ -100,13 +101,14 @@ class SQLRAG:
         self.client = None
         if self.api_key and self.api_key.strip():
             try:
-                self.client = Groq(api_key=self.api_key)
+                self.client = create_chat_client(api_key=self.api_key)
             except Exception as e:
                 console.print(f"[yellow]Warning initializing Groq client: {e}[/yellow]")
 
     # -------------------------------------------------------------------------
     # Step 1: Translate Natural Language Question -> SQL Query
     # -------------------------------------------------------------------------
+    @traceable(name="sql_generation", run_type="chain")
     def generate_sql(self, question: str) -> str:
         """
         Step 1: Uses the LLM to translate a natural language question into a SQL query.
@@ -117,7 +119,8 @@ class SQLRAG:
         prompt = f"{DB_SCHEMA_PROMPT}\nUser Question: {question}\n\nSQL Query:"
 
         try:
-            response = self.client.chat.completions.create(
+            response = llm_chat_completion(
+                client=self.client,
                 model=self.model,
                 messages=[
                     {"role": "system", "content": "You are a specialized text-to-SQL converter for SQLite. Output ONLY executable SQL."},
@@ -184,6 +187,7 @@ class SQLRAG:
     # -------------------------------------------------------------------------
     # Execute SQL Query against SQLite
     # -------------------------------------------------------------------------
+    @traceable(name="sql_execution", run_type="tool")
     def execute_sql(self, sql_query: str) -> tuple[list[tuple], list[str]]:
         """
         Executes a SQL query against mediassist.db.
@@ -208,6 +212,7 @@ class SQLRAG:
     # -------------------------------------------------------------------------
     # Step 3: Synthesize Natural Language Answer
     # -------------------------------------------------------------------------
+    @traceable(name="sql_answer_synthesis", run_type="chain")
     def synthesize_answer(
         self,
         question: str,
@@ -244,7 +249,8 @@ Guidelines:
 """
 
         try:
-            response = self.client.chat.completions.create(
+            response = llm_chat_completion(
+                client=self.client,
                 model=self.model,
                 messages=[
                     {"role": "system", "content": "You are a helpful healthcare data analyst assistant."},
@@ -261,6 +267,7 @@ Guidelines:
     # -------------------------------------------------------------------------
     # Main SQL RAG Chain (with Natural Language RBAC Refusal)
     # -------------------------------------------------------------------------
+    @traceable(name="sql_rag_pipeline", run_type="chain")
     def sql_rag_chain(self, question: str, role: str) -> dict[str, Any]:
         """
         Main entry point for Component 4 SQL RAG.
@@ -328,6 +335,10 @@ Guidelines:
                 "answer": answer,
                 "sql_query": sql_query,
                 "sql_results": {"columns": columns, "rows": rows},
+                "_evaluation_contexts": [
+                    " | ".join(f"{column}: {value}" for column, value in zip(columns, row))
+                    for row in rows
+                ],
                 "retrieval_type": "sql_rag",
                 "role": role,
                 "status": "success",

@@ -27,3 +27,5 @@ data/qdrant_db/
 data/uploads/
 data/cache/
 /resources/
+.medibot/
+logs/

@@ -17,11 +17,13 @@ Pipeline Steps:
 import re
 from typing import Any, Optional
 from rich.console import Console
-from groq import Groq
+from langsmith import traceable
 
+from src.agents.document import DocumentAnswerAgent
 from src.config import settings, ROLE_COLLECTIONS, ALL_COLLECTIONS
 from src.ingestion.vectorstore import VectorStore
 from src.retrieval.reranker import Reranker
+from src.observability.tracing import create_chat_client
 
 console = Console()
 
@@ -50,12 +52,12 @@ class HybridRAGPipeline:
         self.reranker = reranker or Reranker()
         self.model = settings.groq_model
 
-        self.client = None
-        if settings.groq_api_key and settings.groq_api_key.strip():
-            try:
-                self.client = Groq(api_key=settings.groq_api_key)
-            except Exception as e:
-                console.print(f"[yellow]Warning initializing Groq client: {e}[/yellow]")
+        self.client = create_chat_client()
+        self.answer_agent = DocumentAnswerAgent(
+            client=self.client,
+            model=self.model,
+            fallback=self._extract_concise_fallback_answer,
+        )
 
     def _build_no_results_message(self, role: str, accessible_collections: list[str]) -> str:
         """
@@ -76,6 +78,7 @@ class HybridRAGPipeline:
                 f"but could not find information for your question. As a {title}, you may not have access to documents from restricted departments."
             )
 
+    @traceable(name="hybrid_rag_pipeline", run_type="chain")
     def query(
         self,
         question: str,
@@ -135,7 +138,6 @@ class HybridRAGPipeline:
         # Step 4: Format Sources List & LLM Context
         # ---------------------------------------------------------------------
         sources = []
-        context_blocks = []
 
         for idx, chunk in enumerate(relevant_chunks, 1):
             source_info = {
@@ -146,74 +148,26 @@ class HybridRAGPipeline:
             if source_info not in sources:
                 sources.append(source_info)
 
-            context_blocks.append(
-                f"[Doc {idx}: {source_info['source_document']} | Section: {source_info['section_title']}]\n"
-                f"{chunk.get('text', '')}"
-            )
-
-        context_str = "\n\n".join(context_blocks)
-
         # ---------------------------------------------------------------------
         # Step 5: Synthesize Answer with LLM
         # ---------------------------------------------------------------------
-        answer = self._synthesize_llm_answer(question, context_str, role, relevant_chunks)
+        answer_draft = self.answer_agent.answer(
+            question=question,
+            role=role,
+            chunks=relevant_chunks,
+            sources=sources,
+        )
 
         return {
-            "answer": answer,
-            "sources": sources,
+            "answer": answer_draft.answer,
+            "sources": [source.model_dump(exclude_none=True) for source in answer_draft.sources],
             "retrieval_type": "hybrid_rag",
             "role": role,
             "status": "success",
+            # Consumed by the evaluation runner; main.py deliberately omits this
+            # internal field from the public ChatResponse.
+            "_evaluation_contexts": [chunk.get("text", "") for chunk in relevant_chunks if chunk.get("text")],
         }
-
-    def _synthesize_llm_answer(
-        self, question: str, context: str, role: str, chunks: list[dict[str, Any]]
-    ) -> str:
-        """
-        Synthesizes natural language answer using Groq LLM.
-        """
-        if not self.client:
-            return self._extract_concise_fallback_answer(question, chunks)
-
-        system_prompt = (
-            "You are MediBot, an intelligent medical assistant for MediAssist Health Network. "
-            "Answer the user's question directly and concisely using ONLY the provided document context below. "
-            "CRITICAL RULES:\n"
-            "- If the user asks about a SPECIFIC item (e.g. a specific error code like 'E-01', a specific drug, a specific code), "
-            "extract and return ONLY the information for that exact item. Do NOT list or mention other items from the same table or section.\n"
-            "- Do NOT dump entire tables, lists, or document sections. Answer in 2-4 clear sentences maximum.\n"
-            "- Do NOT include information about other error codes, drugs, or items that were NOT asked about.\n"
-            "- If the context does not contain the specific item requested, state clearly that the information is not available."
-        )
-
-        user_prompt = (
-            f"Context:\n{context}\n\n"
-            f"User Question: {question}\n\n"
-            "IMPORTANT: Answer ONLY for the specific item asked about in the question. "
-            "Do not include information about other items even if they appear in the context.\n\n"
-            "Concise Answer:"
-        )
-
-        try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                temperature=0.1,
-                max_tokens=1024,
-            )
-            content = response.choices[0].message.content.strip()
-            # Reasoning models (e.g. openai/gpt-oss-20b) may return empty content
-            # when all token budget is spent on internal reasoning. Fall back locally.
-            if not content:
-                console.print("[yellow]⚠️ LLM returned empty content (reasoning model token budget). Using local extractor.[/yellow]")
-                return self._extract_concise_fallback_answer(question, chunks)
-            return content
-        except Exception as e:
-            console.print(f"[bold red]Error in LLM answer synthesis: {e}[/bold red]")
-            return self._extract_concise_fallback_answer(question, chunks)
 
     def _extract_concise_fallback_answer(self, question: str, chunks: list[dict[str, Any]]) -> str:
         """
@@ -251,10 +205,7 @@ class HybridRAGPipeline:
 
             if matched_lines:
                 answer_lines = matched_lines[:4]  # At most 4 lines about this code
-                return (
-                    f"Based on MediAssist equipment records, here is the information for **{target_code}**:\n\n"
-                    + "\n".join(f"• {line}" for line in answer_lines)
-                )
+                return "\n".join(f"• {line}" for line in answer_lines)
 
         # General keyword fallback: find sentences matching question keywords
         matching_sentences = []
@@ -272,8 +223,10 @@ class HybridRAGPipeline:
         if matching_sentences:
             matching_sentences.sort(key=lambda x: x[0], reverse=True)
             top_matches = list(dict.fromkeys([s[1] for s in matching_sentences[:3]]))
-            return "Based on MediAssist policy records:\n\n" + "\n• ".join([""] + top_matches)
+            return "\n".join(f"• {sentence}" for sentence in top_matches)
 
         # Last resort: return a trimmed excerpt of the top chunk
         top_text = chunks[0].get("text", "") if chunks else ""
-        return f"Based on retrieved document context:\n\n{top_text[:300]}..."
+        if not top_text.strip():
+            return "I couldn't find enough relevant information in the retrieved documents to answer that question."
+        return f"Relevant excerpt:\n\n{top_text[:300]}..."

@@ -46,6 +46,7 @@ from qdrant_client.models import (
     FusionQuery,
 )
 from fastembed import TextEmbedding, SparseTextEmbedding
+from langsmith import traceable
 
 from rich.console import Console
 from rich.progress import Progress, BarColumn, TextColumn, TimeElapsedColumn
@@ -249,6 +250,7 @@ class VectorStore:
         info = self.client.get_collection(COLLECTION_NAME)
         console.print(f"   Total points in collection: [yellow]{info.points_count}[/yellow]")
 
+    @traceable(name="qdrant_hybrid_retrieval", run_type="retriever")
     def search(
         self,
         query: str,

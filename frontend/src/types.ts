@@ -19,7 +19,7 @@ export interface Message {
   sender: 'user' | 'bot';
   text: string;
   sources?: SourceCitation[];
-  retrieval_type?: 'hybrid_rag' | 'sql_rag';
+  retrieval_type?: 'hybrid_rag' | 'sql_rag' | 'input_guardrail';
   role?: string;
   status?: string;
   timestamp: string;

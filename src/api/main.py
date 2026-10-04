@@ -15,8 +15,11 @@ from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from rich.console import Console
+from langsmith import traceable
 
 from src.config import settings, ROLE_COLLECTIONS, ALL_ROLES
+from src.guardrails.input import InputGuardrail
+from src.guardrails.output import OutputGuardrail
 from src.api.auth import (
     DEMO_USERS,
     LoginRequest,
@@ -26,6 +29,7 @@ from src.api.auth import (
     get_current_user,
 )
 from src.retrieval.router import QueryRouter
+from src.observability.tracing import langsmith_request_context
 
 console = Console()
 
@@ -47,6 +51,8 @@ app.add_middleware(
 
 # Lazy singleton router instance
 router_instance: Optional[QueryRouter] = None
+input_guardrail = InputGuardrail()
+output_guardrail = OutputGuardrail()
 
 
 def get_router() -> QueryRouter:
@@ -137,7 +143,28 @@ def get_accessible_collections(role: str) -> dict[str, Any]:
 def chat(
     request: ChatRequest,
     current_user: Optional[UserPayload] = Depends(get_current_user),
-    router: QueryRouter = Depends(get_router),
+) -> ChatResponse:
+    with langsmith_request_context():
+        return _traced_chat_request(request, current_user)
+
+
+def _chat_trace_inputs(inputs: dict[str, Any]) -> dict[str, Any]:
+    request = inputs.get("request")
+    user = inputs.get("current_user")
+    return {
+        "question": getattr(request, "question", None),
+        "role": getattr(user, "role", None),
+    }
+
+
+@traceable(
+    name="medibot_chat_request",
+    run_type="chain",
+    process_inputs=_chat_trace_inputs,
+)
+def _traced_chat_request(
+    request: ChatRequest,
+    current_user: Optional[UserPayload],
 ) -> ChatResponse:
     """
     Main RAG endpoint. Accepts question, identifies user role from Bearer token,
@@ -155,8 +182,31 @@ def chat(
 
     console.print(f"\n API /chat Request from role: [yellow]{active_role}[/yellow]")
 
+    guardrail_verdict = input_guardrail.evaluate(request.question)
+    if guardrail_verdict.verdict != "allowed":
+        return ChatResponse(
+            answer="I can only help with MediAssist clinical, operational, and authorized analytical questions.",
+            sources=[],
+            retrieval_type="input_guardrail",
+            role=active_role,
+            status="input_guardrail_blocked",
+        )
+
+    # Instantiate the target pipeline only after the input guardrail allows the request.
+    router = get_router()
+
     # Route and execute query
     result = router.route_and_execute(question=request.question, role=active_role)
+
+    output_verdict = output_guardrail.evaluate(result, active_role)
+    if output_verdict.verdict != "allowed":
+        return ChatResponse(
+            answer="I’m unable to provide that response because it did not pass MediAssist safety checks.",
+            sources=[],
+            retrieval_type="output_guardrail",
+            role=active_role,
+            status="output_guardrail_blocked",
+        )
 
     # Format sources into Pydantic models
     formatted_sources = []

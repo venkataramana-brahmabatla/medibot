@@ -11,6 +11,7 @@ the reranker narrows this down to a smaller set (e.g. top-3) before passing to L
 from typing import Any, Optional
 from rich.console import Console
 from sentence_transformers import CrossEncoder
+from langsmith import traceable
 
 from src.config import settings
 
@@ -30,6 +31,7 @@ class Reranker:
         console.print(f"📦 Loading Reranker model: [cyan]{model_name}[/cyan]")
         self.model = CrossEncoder(model_name)
 
+    @traceable(name="cross_encoder_reranking", run_type="chain")
     def rerank(
         self,
         query: str,

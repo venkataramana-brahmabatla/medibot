@@ -11,8 +11,12 @@ Usage:
     print(settings.groq_model)
 """
 
+from pathlib import Path
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 class Settings(BaseSettings):
@@ -32,8 +36,27 @@ class Settings(BaseSettings):
     # LLM (Groq API)
     # -------------------------------------------------------------------------
     groq_api_key: str = Field(default="", description="Your Groq API key from console.groq.com")
-    groq_model: str = Field(default="openai/gpt-oss-20b", description="Groq model name to use for all LLM calls")
-    default_provider: str = Field(default="groq", description="LLM provider name")
+    groq_model: str = Field(default="qwen/qwen3.8-27b", description="Groq model name to use for all LLM calls")
+
+    # -------------------------------------------------------------------------
+    # LangSmith tracing
+    # -------------------------------------------------------------------------
+    langsmith_tracing: bool = Field(default=False, description="Enable LangSmith request tracing")
+    langsmith_api_key: str = Field(default="", description="LangSmith API key")
+    langsmith_project: str = Field(default="medibot", description="LangSmith tracing project")
+
+    # -------------------------------------------------------------------------
+    # Evaluation pipeline
+    # -------------------------------------------------------------------------
+    evaluation_latency_limit_seconds: float = Field(
+        default=30.0, gt=0, le=600, description="Maximum response latency for evaluation checks"
+    )
+    evaluation_ragas_threshold: float = Field(
+        default=0.70, ge=0, le=1, description="Minimum aggregate score for each RAGAS metric"
+    )
+    evaluation_judge_threshold: float = Field(
+        default=4.0, ge=1, le=5, description="Minimum mean structured judge score (1-5)"
+    )
 
     # -------------------------------------------------------------------------
     # Storage & Paths
@@ -71,10 +94,20 @@ class Settings(BaseSettings):
     rerank_top_n: int = Field(default=3, description="How many chunks to keep after reranking (sent to LLM)")
 
     # -------------------------------------------------------------------------
+    # Agent Runtime
+    # -------------------------------------------------------------------------
+    agent_timeout_seconds: float = Field(default=30.0, gt=0, le=300, description="Timeout for each agent provider request")
+    agent_max_retries: int = Field(default=2, ge=0, le=5, description="Maximum retries for agent provider requests")
+    agent_document_enabled: bool = Field(default=True, description="Enable the document specialist capability")
+    agent_sql_enabled: bool = Field(default=True, description="Enable the SQL specialist capability")
+
+    # -------------------------------------------------------------------------
     # Pydantic config: read from .env file
     # -------------------------------------------------------------------------
     model_config = SettingsConfigDict(
-        env_file=".env",
+        # Resolve from the repository, not the process working directory. This
+        # keeps IDE run configurations and absolute script invocations working.
+        env_file=PROJECT_ROOT / ".env",
         env_file_encoding="utf-8",
         extra="ignore",  # Ignore unknown keys in .env
     )
