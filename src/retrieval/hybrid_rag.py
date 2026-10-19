@@ -94,8 +94,6 @@ class HybridRAGPipeline:
         accessible_collections = ROLE_COLLECTIONS.get(role, [])
 
         console.print(f"\n🔍 [bold cyan]Processing Hybrid RAG Query[/bold cyan] (User Role: [yellow]{role}[/yellow])")
-        console.print(f"❓ Question: [italic]\"{question}\"[/italic]")
-
         # ---------------------------------------------------------------------
         # Step 1: Hybrid Search (Dense + Sparse BM25 + RBAC Filter)
         # ---------------------------------------------------------------------

@@ -17,8 +17,10 @@ RBAC Enforcement:
     - Restricted roles (nurse, doctor, technician) receive a friendly natural language refusal message.
 """
 
+import logging
 import re
 import sqlite3
+import time
 from pathlib import Path
 from typing import Any, Optional
 from rich.console import Console
@@ -30,6 +32,23 @@ from src.config import settings, SQL_RAG_ROLES, ROLE_COLLECTIONS
 from src.observability.tracing import create_chat_client, llm_chat_completion
 
 console = Console()
+logger = logging.getLogger(__name__)
+
+ALLOWED_SQL_TABLES = {"claims", "maintenance_tickets"}
+RESTRICTED_SQL_COLUMNS = {
+    "patient_id",
+    "patient_name",
+    "claim_id",
+    "ticket_id",
+    "raised_by",
+    "resolution_note",
+}
+ALLOWED_SQL_FUNCTIONS = {
+    "abs", "avg", "coalesce", "count", "date", "datetime", "ifnull",
+    "length", "lower", "max", "min", "round", "strftime", "substr",
+    "sum", "upper",
+}
+AGGREGATE_SQL_FUNCTIONS = {"avg", "count", "max", "min", "sum"}
 
 ROLE_TITLES: dict[str, str] = {
     "doctor": "doctor",
@@ -46,9 +65,6 @@ Your task is to translate natural language questions into valid, optimized SQLit
 
 Database Schema:
 Table 1: claims
-  - claim_id (TEXT, e.g. 'CLM-2024-1000')
-  - patient_id (TEXT, e.g. 'PAT-51347')
-  - patient_name (TEXT)
   - department (TEXT, e.g. 'nephrology', 'cardiology', 'neurology', 'pediatrics', 'orthopedics', 'oncology')
   - claim_type (TEXT, e.g. 'reimbursement', 'cashless')
   - diagnosis_code (TEXT, e.g. 'N17.9', 'I21.4', 'I63.9')
@@ -60,24 +76,22 @@ Table 1: claims
   - resolved_date (TEXT, format 'YYYY-MM-DD', e.g. '2024-12-28')
 
 Table 2: maintenance_tickets
-  - ticket_id (TEXT, e.g. 'TKT-2024-2000')
   - equipment_name (TEXT, e.g. 'SterilPro 3000', 'DriveFlow IP-200')
   - equipment_id (TEXT, e.g. 'EQ-HC-3588')
   - category (TEXT, e.g. 'sterilisation', 'infusion', 'imaging', 'ventilation', 'dialysis', 'defibrillator')
   - campus (TEXT, e.g. 'MediAssist Hyderabad Central', 'MediAssist Bengaluru City', 'MediAssist Mumbai West')
   - issue_type (TEXT, e.g. 'preventive_maintenance', 'sensor_failure', 'battery_replacement', 'calibration_error')
   - fault_code (TEXT, e.g. 'F-05', 'F-01')
-  - raised_by (TEXT)
   - raised_date (TEXT, format 'YYYY-MM-DD')
   - resolved_date (TEXT, format 'YYYY-MM-DD')
   - status (TEXT, allowed values: 'in_progress', 'resolved', 'escalated', 'open')
-  - resolution_note (TEXT)
 
 SQL Rules:
 1. Return ONLY the raw SQL query. Do NOT include any markdown code blocks, explanation text, or comments.
 2. Use standard SQLite functions (e.g. COUNT(*), SUM(), AVG(), LOWER(), strftime(), GROUP BY, ORDER BY, LIMIT).
 3. Do NOT use non-existent tables or columns.
 4. Always write read-only SELECT queries.
+5. Return aggregate analytics only; never return individual claim or ticket rows.
 """
 
 
@@ -131,8 +145,8 @@ class SQLRAG:
             )
             raw_sql = response.choices[0].message.content.strip()
             return raw_sql
-        except Exception as e:
-            console.print(f"[bold red]Error in LLM SQL generation: {e}[/bold red]")
+        except Exception:
+            logger.warning("SQL generation failed; using deterministic fallback")
             return self._fallback_sql_generator(question)
 
     # -------------------------------------------------------------------------
@@ -148,6 +162,8 @@ class SQLRAG:
         - Ensures query is read-only (starts with SELECT)
         """
         cleaned = raw_sql.strip()
+        if len(cleaned) > 10_000:
+            raise ValueError("Generated SQL exceeds the configured query length")
 
         # Remove markdown code fences if present
         if "```" in cleaned:
@@ -198,12 +214,56 @@ class SQLRAG:
         if not self.db_path.exists():
             raise FileNotFoundError(f"Database not found at {self.db_path}")
 
-        conn = sqlite3.connect(str(self.db_path))
+        db_uri = f"{self.db_path.resolve().as_uri()}?mode=ro"
+        conn = sqlite3.connect(db_uri, uri=True)
         cursor = conn.cursor()
+        deadline = time.monotonic() + settings.sql_query_timeout_seconds
+        aggregate_used = False
+
+        def authorize(
+            action: int,
+            arg1: Optional[str],
+            arg2: Optional[str],
+            _db: str,
+            _trigger: str,
+        ) -> int:
+            nonlocal aggregate_used
+            allowed_actions = {
+                sqlite3.SQLITE_SELECT,
+                sqlite3.SQLITE_READ,
+                sqlite3.SQLITE_FUNCTION,
+            }
+            recursive_action = getattr(sqlite3, "SQLITE_RECURSIVE", None)
+            if recursive_action is not None:
+                allowed_actions.add(recursive_action)
+            if action not in allowed_actions:
+                return sqlite3.SQLITE_DENY
+            if action == sqlite3.SQLITE_READ:
+                table = (arg1 or "").lower()
+                column = (arg2 or "").lower()
+                if table not in ALLOWED_SQL_TABLES or column in RESTRICTED_SQL_COLUMNS:
+                    return sqlite3.SQLITE_DENY
+            if action == sqlite3.SQLITE_FUNCTION:
+                function_name = (arg2 or arg1 or "").lower()
+                if function_name not in ALLOWED_SQL_FUNCTIONS:
+                    return sqlite3.SQLITE_DENY
+                if function_name in AGGREGATE_SQL_FUNCTIONS:
+                    aggregate_used = True
+            return sqlite3.SQLITE_OK
+
+        conn.set_authorizer(authorize)
+        conn.set_progress_handler(
+            lambda: int(time.monotonic() > deadline),
+            1_000,
+        )
 
         try:
             cursor.execute(sql_query)
-            rows = cursor.fetchall()
+            if not aggregate_used:
+                raise ValueError("SQL analytics must use an aggregate function")
+            rows = cursor.fetchmany(settings.sql_max_result_rows + 1)
+            if len(rows) > settings.sql_max_result_rows:
+                raise ValueError("SQL result exceeds configured row limit")
             columns = [desc[0] for desc in cursor.description] if cursor.description else []
             return rows, columns
         finally:
@@ -260,8 +320,8 @@ Guidelines:
                 max_tokens=400,
             )
             return response.choices[0].message.content.strip()
-        except Exception as e:
-            console.print(f"[bold red]Error synthesizing LLM answer: {e}[/bold red]")
+        except Exception:
+            logger.warning("SQL answer synthesis failed; using deterministic fallback")
             return self._fallback_answer_synthesizer(question, sql_query, columns, rows)
 
     # -------------------------------------------------------------------------
@@ -277,7 +337,6 @@ Guidelines:
             - Blocked roles: nurse, doctor, technician
         """
         console.print(f"\n📊 [bold cyan]Processing SQL RAG Query[/bold cyan] (User Role: [yellow]{role}[/yellow])")
-        console.print(f"❓ Question: [italic]\"{question}\"[/italic]")
 
         # Friendly role title for natural English
         title = ROLE_TITLES.get(role, role)
@@ -301,18 +360,15 @@ Guidelines:
 
         # Step 1: Generate SQL Query
         raw_sql = self.generate_sql(question)
-        console.print(f"📝 Raw SQL Generated: [dim]{raw_sql}[/dim]")
 
         # Step 2: Clean and Validate SQL
         try:
             sql_query = self.clean_sql(raw_sql)
-            console.print(f"✨ Cleaned SQL Query:\n[green]{sql_query}[/green]")
         except Exception as e:
-            error_msg = f"Failed to clean or validate SQL query: {e}"
-            console.print(f"[bold red]❌ {error_msg}[/bold red]")
+            logger.warning("Rejected generated SQL (%s)", type(e).__name__)
             return {
-                "answer": error_msg,
-                "sql_query": raw_sql,
+                "answer": "I couldn't safely run that analytics query. Please ask for a summary of authorized records.",
+                "sql_query": None,
                 "sql_results": None,
                 "retrieval_type": "sql_rag",
                 "role": role,
@@ -345,11 +401,10 @@ Guidelines:
             }
 
         except Exception as e:
-            error_msg = f"Database query execution error: {e}"
-            console.print(f"[bold red]❌ {error_msg}[/bold red]")
+            logger.warning("SQL execution failed (%s)", type(e).__name__)
             return {
-                "answer": f"I encountered an error executing the database query: {e}",
-                "sql_query": sql_query,
+                "answer": "I couldn't safely complete that analytics query. Please try a more concise summary question.",
+                "sql_query": None,
                 "sql_results": None,
                 "retrieval_type": "sql_rag",
                 "role": role,

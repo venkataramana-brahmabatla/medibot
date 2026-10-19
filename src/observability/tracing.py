@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 
 def create_chat_client(api_key: str | None = None) -> OpenAI | None:
     """Create a sync OpenAI-compatible client for Groq."""
+    if not settings.allow_external_llm_data:
+        return None
     key = api_key or settings.groq_api_key
     if not key.strip():
         return None
@@ -31,6 +33,8 @@ def create_chat_client(api_key: str | None = None) -> OpenAI | None:
 
 def create_chat_model(temperature: float = 0) -> ChatOpenAI | None:
     """Create the LangChain wrapper used by OpenEvals and RAGAS."""
+    if not settings.allow_external_llm_data:
+        return None
     if not settings.groq_api_key.strip():
         return None
     return ChatOpenAI(

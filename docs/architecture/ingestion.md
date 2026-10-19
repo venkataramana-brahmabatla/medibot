@@ -31,8 +31,9 @@ flowchart TD
     Embed --> Sparse[Sparse Qdrant/bm25 vectors]
     Dense --> Payload[Build Qdrant points with text and access metadata]
     Sparse --> Payload
-    Payload --> Upsert[Upsert batches into local Qdrant]
-    Upsert --> Summary[Print indexed point count]
+    Payload --> Upsert[Upsert stable IDs for the new chunk set]
+    Upsert --> Cleanup[Delete stale points after a successful upsert]
+    Cleanup --> Summary[Print indexed point count]
     SkipFolder --> Scan
     SkipFile --> File
     ParseFail --> Scan
@@ -43,5 +44,7 @@ flowchart TD
 ```
 
 `--store` is required to write to Qdrant; without it the script parses and
-chunks documents and prints a preview only. Collection access metadata is
-derived from the role/collection policy in `src/config.py`.
+chunks documents and prints metadata without document text. Collection access
+metadata is derived from the role/collection policy in `src/config.py`. Point
+IDs are stable per document chunk, and stale points are removed only after the
+replacement chunks are stored successfully.

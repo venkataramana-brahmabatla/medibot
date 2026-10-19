@@ -29,6 +29,7 @@ Usage:
 
 from typing import Optional
 from pathlib import Path
+from uuid import NAMESPACE_URL, uuid5
 
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
@@ -37,6 +38,7 @@ from qdrant_client.models import (
     SparseVectorParams,
     SparseIndexParams,
     PointStruct,
+    PointIdsList,
     SparseVector,
     Filter,
     FieldCondition,
@@ -182,17 +184,19 @@ class VectorStore:
                         (smaller = less memory, larger = faster)
 
         Each stored point in Qdrant has:
-            id      : an integer (0, 1, 2, ...)
+            id      : a stable UUID derived from document and chunk content
             vectors : {"dense": [...], "sparse": {indices, values}}
             payload : {source_document, collection, access_roles,
                        section_title, chunk_type, text}
         """
         if not chunks:
-            console.print("[red]No chunks to store![/red]")
+            console.print("[yellow]No current chunks; removing indexed points from the empty corpus.[/yellow]")
+            self._remove_stale_points(set())
             return
 
         console.print(f"\n💾 Storing [bold]{len(chunks)}[/bold] chunks into Qdrant...")
         total_stored = 0
+        current_point_ids: set[str] = set()
 
         with Progress(
             TextColumn("[progress.description]{task.description}"),
@@ -215,7 +219,15 @@ class VectorStore:
                 # Build Qdrant PointStruct objects
                 points = []
                 for i, (chunk, dense, sparse) in enumerate(zip(batch, dense_vecs, sparse_vecs)):
-                    point_id = batch_start + i  # unique integer ID for each chunk
+                    identity = "\0".join((
+                        chunk.source_document,
+                        chunk.collection,
+                        chunk.section_title,
+                        chunk.chunk_type,
+                        chunk.text,
+                    ))
+                    point_id = str(uuid5(NAMESPACE_URL, identity))
+                    current_point_ids.add(point_id)
 
                     points.append(PointStruct(
                         id=point_id,
@@ -244,11 +256,35 @@ class VectorStore:
                 total_stored += len(batch)
                 progress.advance(task, len(batch))
 
+        self._remove_stale_points(current_point_ids)
+
         console.print(f"\n[bold green]✅ Stored {total_stored} chunks in Qdrant[/bold green]")
 
         # Show collection stats
         info = self.client.get_collection(COLLECTION_NAME)
         console.print(f"   Total points in collection: [yellow]{info.points_count}[/yellow]")
+
+    def _remove_stale_points(self, current_point_ids: set[str]) -> None:
+        """Delete old corpus points after a complete replacement has been indexed."""
+        stale_ids = []
+        offset = None
+        while True:
+            points, offset = self.client.scroll(
+                collection_name=COLLECTION_NAME,
+                limit=256,
+                offset=offset,
+                with_payload=False,
+                with_vectors=False,
+            )
+            stale_ids.extend(point.id for point in points if str(point.id) not in current_point_ids)
+            if offset is None:
+                break
+        if stale_ids:
+            self.client.delete(
+                collection_name=COLLECTION_NAME,
+                points_selector=PointIdsList(points=stale_ids),
+            )
+            console.print(f"🧹 Removed [yellow]{len(stale_ids)}[/yellow] stale document chunks")
 
     @traceable(name="qdrant_hybrid_retrieval", run_type="retriever")
     def search(

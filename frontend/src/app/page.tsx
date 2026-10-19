@@ -7,37 +7,20 @@ import ChatMessage from '../components/ChatMessage';
 import ChatInput from '../components/ChatInput';
 import CollectionsModal from '../components/CollectionsModal';
 import { User, Message, Role } from '../types';
-import { DEMO_ACCOUNTS } from '../constants/demoAccounts';
 import { Stethoscope, Sparkles } from 'lucide-react';
 
-function readStoredUser(): User | null {
-  if (typeof window === 'undefined') return null;
-
-  const savedUser = localStorage.getItem('medibot_user');
-  if (!savedUser) return null;
-
-  try {
-    return JSON.parse(savedUser) as User;
-  } catch {
-    localStorage.removeItem('medibot_user');
-    return null;
-  }
-}
-
 export default function Home() {
-  const [user, setUser] = useState<User | null>(readStoredUser);
+  const [user, setUser] = useState<User | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [loading, setLoading] = useState(false);
-  const [accessibleCollections, setAccessibleCollections] = useState<string[]>(() => {
-    const storedUser = readStoredUser();
-    return DEMO_ACCOUNTS.find((account) => account.role === storedUser?.role)?.accessible_collections ?? [];
-  });
+  const [accessibleCollections, setAccessibleCollections] = useState<string[]>([]);
   const [isCollectionsOpen, setIsCollectionsOpen] = useState(false);
   const chatBottomRef = useRef<HTMLDivElement>(null);
 
   const fetchAccessibleCollections = useCallback(async (role: Role) => {
     try {
-      const res = await fetch(`http://localhost:8000/collections/${role}`);
+      const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://127.0.0.1:8000';
+      const res = await fetch(`${apiBaseUrl}/collections/${role}`);
       if (res.ok) {
         const data = await res.json();
         setAccessibleCollections(data.accessible_collections || []);
@@ -55,7 +38,6 @@ export default function Home() {
   const handleLogin = (token: string, username: string, role: Role, fullName: string) => {
     const u: User = { token, username, role, full_name: fullName };
     setUser(u);
-    localStorage.setItem('medibot_user', JSON.stringify(u));
     void fetchAccessibleCollections(role);
 
     // Initial greeting
@@ -72,7 +54,6 @@ export default function Home() {
   const handleLogout = () => {
     setUser(null);
     setMessages([]);
-    localStorage.removeItem('medibot_user');
   };
 
   const handleSendMessage = async (text: string) => {
@@ -89,7 +70,8 @@ export default function Home() {
     setLoading(true);
 
     try {
-      const res = await fetch('http://localhost:8000/chat', {
+      const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://127.0.0.1:8000';
+      const res = await fetch(`${apiBaseUrl}/chat`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -124,7 +106,7 @@ export default function Home() {
       const errorMsg: Message = {
         id: (Date.now() + 1).toString(),
         sender: 'bot',
-        text: `Error connecting to MediBot server: ${errorMessage || 'Make sure FastAPI is running on http://localhost:8000'}`,
+        text: `Error connecting to MediBot server: ${errorMessage || 'Make sure FastAPI is running'}`,
         status: 'error',
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       };

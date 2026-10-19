@@ -65,6 +65,7 @@ export default function ChatInput({ onSendMessage, disabled, role }: ChatInputPr
       <form onSubmit={handleSubmit} className="flex items-center gap-2">
         <input
           type="text"
+          maxLength={4000}
           value={input}
           onChange={(e) => setInput(e.target.value)}
           placeholder={`Ask MediBot a clinical, policy, or SQL analytical question as '${role}'...`}

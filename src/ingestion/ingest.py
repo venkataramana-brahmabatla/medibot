@@ -241,6 +241,10 @@ def run_ingestion(docs_dir: str = None, store: bool = False) -> list[ProcessedCh
             # Chunk
             progress.update(task, description=f"✂️  Chunking: [cyan]{doc_info.file_name}[/cyan]")
             chunks = chunk_document(doc, doc_info, chunker)
+            if not chunks:
+                summary_rows.append((doc_info.file_name, doc_info.collection, "0", "FAILED"))
+                progress.advance(task)
+                continue
             all_chunks.extend(chunks)
 
             elapsed = time.time() - start
@@ -275,10 +279,13 @@ def run_ingestion(docs_dir: str = None, store: bool = False) -> list[ProcessedCh
         console.print(f"  access_roles    : [magenta]{sample.access_roles}[/magenta]")
         console.print(f"  section_title   : [yellow]{sample.section_title}[/yellow]")
         console.print(f"  chunk_type      : [blue]{sample.chunk_type}[/blue]")
-        console.print(f"  text (preview)  : {sample.text[:200]}...")
+        console.print("  text (preview)  : omitted to keep document contents out of logs")
 
     # --- Phase 2: Store in Qdrant (optional) ---
-    if store and all_chunks:
+    failed_documents = any(row[3] == "FAILED" for row in summary_rows)
+    if store and failed_documents:
+        console.print("[bold red]Index update skipped because one or more source documents failed to parse.[/bold red]")
+    elif store:
         # Import here to avoid circular import and to keep Phase 1 runnable standalone
         from src.ingestion.vectorstore import VectorStore
         console.rule("[bold blue]MediBot — Phase 2: Storing in Qdrant[/bold blue]")

@@ -1,7 +1,7 @@
 # MediBot 🏥
 > Advanced RAG 2.0 Backend & Next.js Frontend with Qdrant Hybrid Search, Cross-Encoder Reranking, SQL RAG & Role-Based Access Control (RBAC)
 
-MediBot is a production-grade internal clinical assistant for **MediAssist Health Network**. It delivers accurate medical reference retrieval and analytical database answers while enforcing strict **Role-Based Access Control (RBAC)** at the vector store and database query levels.
+MediBot is a development prototype for retrieval over clinical reference and operational data. It is not ready for production, PHI, or clinical decision-making. A production deployment requires an approved identity provider and explicit approval for all external model and tracing data flows.
 
 ---
 
@@ -87,15 +87,13 @@ For stage-by-stage flowcharts and a package-by-package dependency guide, see
 
 ---
 
-## 🔑 Demo Account Credentials
+## 🔑 Local Demo Accounts
 
-| Username | Password | Role | Department |
-|---|---|---|---|
-| `dr.mehta` | `doctor123` | `doctor` | Clinical Cardiology |
-| `nurse.priya` | `nurse123` | `nurse` | ICU Nursing Care |
-| `billing.ravi` | `billing123` | `billing_executive` | Billing & Claims |
-| `tech.anand` | `tech123` | `technician` | Equipment Maintenance |
-| `admin.sys` | `admin123` | `admin` | System Administrator |
+These fixed demo identities are accepted only when `APP_ENV=development` and
+`DEMO_AUTH_ENABLED=true`. They share the private `DEMO_AUTH_PASSWORD` configured
+in the local `.env`; demo authentication is rejected in production. The UI does
+not bundle demo passwords. Production login is not implemented yet and must be
+connected to an approved identity provider before deployment.
 
 ---
 
@@ -110,19 +108,28 @@ For stage-by-stage flowcharts and a package-by-package dependency guide, see
 ### 1. Environment Setup & Configuration
 Create `.env` file in root directory:
 ```bash
+APP_ENV=development
+DEBUG=false
+DEMO_AUTH_ENABLED=true
+DEMO_AUTH_PASSWORD=<private value of at least 16 characters>
+JWT_SECRET_KEY=<private random value generated with openssl rand -hex 32>
 GROQ_API_KEY=your_groq_api_key_here
+ALLOW_EXTERNAL_LLM_DATA=true
 GROQ_MODEL=qwen/qwen3.8-27b
-LANGSMITH_TRACING=true
+LANGSMITH_TRACING=false
 LANGSMITH_API_KEY=your_langsmith_api_key_here
 LANGSMITH_PROJECT=medibot
+LANGSMITH_TRACE_CONTENT=false
 DB_PATH=./data/documents/db/mediassist.db
 QDRANT_PATH=./data/qdrant_db
-JWT_SECRET_KEY=medibot-dev-secret-key
 ```
-When tracing is enabled, MediBot records the chat request, guardrail decisions,
-routing, retrieval, reranking, and generation spans in the configured LangSmith
-project. Span durations expose request and step latency; model-call traces
-include token usage when Groq returns it.
+Create private random secrets for local development and keep `.env` mode `0600`.
+Set `ALLOW_EXTERNAL_LLM_DATA=true` only when you accept sending questions,
+retrieved documents, and SQL result data to Groq. It defaults to disabled.
+LangSmith tracing stays off by default. Enabling it requires both
+`LANGSMITH_TRACING=true` and `LANGSMITH_TRACE_CONTENT=true`; traces may contain
+questions, prompts, retrieved documents, SQL results, and generated answers.
+Review provider data-handling terms before enabling it with sensitive data.
 
 ### 2. Repeatable Evaluation Pipeline
 
@@ -172,15 +179,15 @@ mean judge score. Override them with `EVALUATION_LATENCY_LIMIT_SECONDS`,
 only when all thresholds are met, all live heuristic checks pass, and every
 judge result is valid.
 
-The checked-in sample run is in [`reports/evaluation_latest.md`](reports/evaluation_latest.md). It is a real failed run, not a passing or illustrative report: the run stopped when Groq rejected a RAGAS request for exceeding the account's output-token-per-minute limit. It reports unavailable RAGAS metrics and a failed verdict. Resolve the provider limit, enable the complete suite, and rerun before treating the project as submission-ready.
+The checked-in sample run is in [`reports/evaluation_latest.md`](reports/evaluation_latest.md). It passes on four active cases out of fifteen, with only two answerable cases scored by RAGAS. This small sample is not production validation. Enable the full suite, resolve provider limits if needed, and rerun before relying on the results.
 
 Sample report excerpt:
 
 ```text
-- **Overall verdict:** FAIL
-- **Cases:** 4 active of 15 labeled; 0 answerable cases scored by RAGAS
-- **RAGAS:** unavailable because Groq rejected the request for exceeding output tokens per minute
-- **Judge mean:** 3.00/5 (required: 4.00/5)
+- **Overall verdict:** PASS
+- **Cases:** 4 active of 15 labeled; 2 answerable cases scored by RAGAS
+- **RAGAS:** available for the two answerable cases
+- **Judge mean:** 5.00/5 (required: 4.00/5)
 - **Heuristics:** all four checks passed on the four active cases
 ```
 

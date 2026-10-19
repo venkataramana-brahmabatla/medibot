@@ -7,7 +7,9 @@ Source: `src/api/main.py`, `src/api/auth.py`, `src/guardrails/input.py`, and
 flowchart TD
     Client[Frontend or API client] --> AuthRoute{Endpoint}
     AuthRoute -- POST /login --> Credentials[Look up demo account]
-    Credentials --> Valid{Username and password valid?}
+    Credentials --> DemoMode{Development demo auth enabled?}
+    DemoMode -- No --> Disabled[Return 503; production identity provider required]
+    DemoMode -- Yes --> Valid{Username and private shared password valid?}
     Valid -- No --> 401[Return 401]
     Valid -- Yes --> JWT[Sign role-bearing JWT with PyJWT]
     JWT --> Token[Return bearer token]
@@ -42,6 +44,9 @@ flowchart TD
     LocalAllow --> Response
 ```
 
+Demo accounts are development-only and require a private password from `.env`.
+Login and chat have request size, field length, and per-process rate limits;
+production deployments must also configure equivalent limits at the edge.
 The input guardrail is deterministic. OpenEvals is used by the output
 guardrail when `GROQ_API_KEY` is configured; provider failures and malformed
 verdicts block the response. Internal reasons go to application logs, while

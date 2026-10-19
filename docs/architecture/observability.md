@@ -34,7 +34,9 @@ flowchart TD
     Duration --> TraceView
 ```
 
-When tracing is disabled or the LangSmith API key is absent, the application
-continues with tracing disabled. Guardrail decisions are also written as
-structured JSON log events. Groq token counts appear when the provider returns
-usage data; span durations provide request and stage timing.
+Tracing defaults to disabled. It requires both `LANGSMITH_TRACING=true` and
+`LANGSMITH_TRACE_CONTENT=true` because instrumented spans may contain questions,
+prompts, retrieved documents, SQL results, and generated answers. Guardrail
+decisions are also written as structured JSON log events. Groq token counts
+appear when the provider returns usage data; span durations provide request and
+stage timing.

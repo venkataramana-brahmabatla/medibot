@@ -3,58 +3,50 @@ src/api/auth.py
 ---------------
 Authentication and JWT token handling for MediBot FastAPI backend.
 
-Demo Accounts (User -> Password -> Role):
-  - dr.mehta / doctor123           -> doctor
-  - nurse.priya / nurse123         -> nurse
-  - billing.ravi / billing123       -> billing_executive
-  - tech.anand / tech123           -> technician
-  - admin.sys / admin123           -> admin
+Local demo identities are available only when demo authentication is enabled
+in a development environment. The shared password is loaded from .env.
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 import jwt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from src.config import settings
+from src.config import ALL_ROLES, settings
 
 # -----------------------------------------------------------------------------
-# Demo Accounts Database
+# Local development identities only. Passwords are supplied out of band through
+# DEMO_AUTH_PASSWORD and demo mode is rejected outside APP_ENV=development.
 # -----------------------------------------------------------------------------
 DEMO_USERS = {
     "dr.mehta": {
         "username": "dr.mehta",
-        "password": "doctor123",
         "full_name": "Dr. Rajesh Mehta",
         "role": "doctor",
         "department": "Clinical Cardiology",
     },
     "nurse.priya": {
         "username": "nurse.priya",
-        "password": "nurse123",
         "full_name": "Nurse Priya Sharma",
         "role": "nurse",
         "department": "ICU Nursing",
     },
     "billing.ravi": {
         "username": "billing.ravi",
-        "password": "billing123",
         "full_name": "Ravi Kumar",
         "role": "billing_executive",
         "department": "Billing & Insurance",
     },
     "tech.anand": {
         "username": "tech.anand",
-        "password": "tech123",
         "full_name": "Anand Verma",
         "role": "technician",
         "department": "Medical Equipment Maintenance",
     },
     "admin.sys": {
         "username": "admin.sys",
-        "password": "admin123",
         "full_name": "System Administrator",
         "role": "admin",
         "department": "IT & Executive Admin",
@@ -68,8 +60,8 @@ security = HTTPBearer(auto_error=False)
 # Pydantic Schemas
 # -----------------------------------------------------------------------------
 class LoginRequest(BaseModel):
-    username: str
-    password: str
+    username: str = Field(min_length=1, max_length=80)
+    password: str = Field(min_length=1, max_length=256)
 
 
 class TokenResponse(BaseModel):
@@ -93,14 +85,19 @@ def create_access_token(user_data: dict) -> str:
     """
     Generates a role-tagged JWT access token.
     """
-    expire = datetime.utcnow() + timedelta(hours=settings.jwt_expiry_hours)
+    now = datetime.now(timezone.utc)
+    expire = now + timedelta(hours=settings.jwt_expiry_hours)
     payload = {
         "sub": user_data["username"],
         "role": user_data["role"],
         "full_name": user_data["full_name"],
+        "iat": now,
         "exp": expire,
+        "iss": "medibot",
+        "aud": "medibot-client",
+        "typ": "access",
     }
-    encoded_jwt = jwt.encode(payload, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
+    encoded_jwt = jwt.encode(payload, settings.jwt_secret_key, algorithm="HS256")
     return encoded_jwt
 
 
@@ -109,7 +106,16 @@ def verify_token(token: str) -> Optional[UserPayload]:
     Verifies JWT token signature and expiry.
     """
     try:
-        payload = jwt.decode(token, settings.jwt_secret_key, algorithms=[settings.jwt_algorithm])
+        payload = jwt.decode(
+            token,
+            settings.jwt_secret_key,
+            algorithms=["HS256"],
+            issuer="medibot",
+            audience="medibot-client",
+            options={"require": ["sub", "role", "exp", "iat", "iss", "aud", "typ"]},
+        )
+        if payload.get("typ") != "access" or payload.get("role") not in ALL_ROLES:
+            return None
         return UserPayload(
             username=payload["sub"],
             role=payload["role"],

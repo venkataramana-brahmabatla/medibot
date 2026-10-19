@@ -14,7 +14,7 @@ flowchart TD
     RoleGate -- No --> RBAC[Return SQL RBAC refusal; do not query database]
     RoleGate -- Yes --> Generate[Groq generates SQL from schema and question]
     Generate --> Clean[Strip code fences and isolate SQL statement]
-    Clean --> ReadOnly{Starts with SELECT or WITH and no forbidden write keywords?}
+    Clean --> ReadOnly{SELECT or WITH passes SQLite authorizer?}
     ReadOnly -- No --> Reject[Reject SQL and return an error response]
     ReadOnly -- Yes --> DB[Execute against local SQLite database]
     DB --> Results[Fetch rows and column names]
@@ -24,6 +24,9 @@ flowchart TD
     Synthesis --> Return[Return answer, SQL result context and status]
 ```
 
-SQLite execution is separate from the LLM: the generated query is checked by
-`clean_sql` before it runs. Evaluation-only result context is attached
-internally and omitted from the public `/chat` response.
+SQLite execution is separate from the LLM: generated queries run on a read-only
+connection under an authorizer limited to approved tables, aggregate functions,
+and non-identifying columns. Row-level output is rejected. Execution time and
+result rows are bounded. Evaluation-only result context is
+attached internally and omitted from the public `/chat` response. SQL errors
+return generic user-facing messages without query or database details.

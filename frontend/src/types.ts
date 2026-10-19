@@ -27,7 +27,6 @@ export interface Message {
 
 export interface DemoAccount {
   username: string;
-  password: string;
   full_name: string;
   role: Role;
   department: string;

@@ -10,12 +10,18 @@ Endpoints:
   - GET  /health               : System health status check
 """
 
+from collections import defaultdict, deque
+import hmac
+from threading import Lock
+from time import monotonic
 from typing import Any, Optional
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from rich.console import Console
 from langsmith import traceable
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from src.config import settings, ROLE_COLLECTIONS, ALL_ROLES
 from src.guardrails.input import InputGuardrail
@@ -38,6 +44,9 @@ app = FastAPI(
     title=settings.app_name,
     description="MediBot Advanced RAG & Role-Based Access Control Backend API",
     version="1.0.0",
+    docs_url=None if settings.app_env == "production" else "/docs",
+    redoc_url=None if settings.app_env == "production" else "/redoc",
+    openapi_url=None if settings.app_env == "production" else "/openapi.json",
 )
 
 # Enable CORS for Next.js Frontend (runs on localhost:3000)
@@ -55,6 +64,112 @@ input_guardrail = InputGuardrail()
 output_guardrail = OutputGuardrail()
 
 
+class _InMemoryRateLimiter:
+    """Per-process abuse guard; production deployments should also rate-limit at the proxy."""
+
+    def __init__(self) -> None:
+        self._attempts: dict[tuple[str, str], deque[float]] = defaultdict(deque)
+        self._lock = Lock()
+        self._checks = 0
+
+    def allow(self, key: tuple[str, str], maximum: int, window_seconds: int = 60) -> bool:
+        now = monotonic()
+        cutoff = now - window_seconds
+        with self._lock:
+            self._checks += 1
+            if self._checks % 128 == 0:
+                for old_key, old_attempts in list(self._attempts.items()):
+                    while old_attempts and old_attempts[0] <= cutoff:
+                        old_attempts.popleft()
+                    if not old_attempts:
+                        self._attempts.pop(old_key, None)
+            if key not in self._attempts and len(self._attempts) >= 10_000:
+                self._attempts.pop(next(iter(self._attempts)))
+            attempts = self._attempts[key]
+            while attempts and attempts[0] <= cutoff:
+                attempts.popleft()
+            if len(attempts) >= maximum:
+                return False
+            attempts.append(now)
+            return True
+
+
+request_limiter = _InMemoryRateLimiter()
+
+
+class RequestSecurityMiddleware:
+    """Enforce bounded request bodies and basic per-process endpoint throttling."""
+
+    _LIMITED_PATHS = {"/login", "/chat"}
+    _MAX_BODY_BYTES = 16_384
+
+    def __init__(self, inner_app: ASGIApp):
+        self.inner_app = inner_app
+
+    async def _reject(self, scope: Scope, receive: Receive, send: Send, status_code: int, detail: str) -> None:
+        response = JSONResponse(status_code=status_code, content={"detail": detail})
+        await response(scope, receive, send)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        path = scope.get("path", "")
+        if scope.get("type") != "http" or path not in self._LIMITED_PATHS:
+            await self.inner_app(scope, receive, send)
+            return
+
+        headers = {key.lower(): value for key, value in scope.get("headers", [])}
+        content_length = headers.get(b"content-length")
+        if content_length:
+            try:
+                if int(content_length) > self._MAX_BODY_BYTES:
+                    await self._reject(scope, receive, send, 413, "Request body is too large.")
+                    return
+            except ValueError:
+                await self._reject(scope, receive, send, 400, "Invalid content length.")
+                return
+
+        client = scope.get("client")
+        client_ip = client[0] if client else "unknown"
+        maximum = 5 if path == "/login" else 20
+        if not request_limiter.allow((client_ip, path), maximum):
+            response = JSONResponse(
+                status_code=429,
+                headers={"Retry-After": "60"},
+                content={"detail": "Too many requests. Please retry later."},
+            )
+            await response(scope, receive, send)
+            return
+
+        # Count streamed bodies too, then replay the small bounded body to FastAPI.
+        buffered_messages: list[Message] = []
+        body_size = 0
+        while True:
+            message = await receive()
+            buffered_messages.append(message)
+            if message["type"] != "http.request":
+                break
+            body_size += len(message.get("body", b""))
+            if body_size > self._MAX_BODY_BYTES:
+                await self._reject(scope, receive, send, 413, "Request body is too large.")
+                return
+            if not message.get("more_body", False):
+                break
+
+        message_index = 0
+
+        async def replay_body() -> Message:
+            nonlocal message_index
+            if message_index < len(buffered_messages):
+                message = buffered_messages[message_index]
+                message_index += 1
+                return message
+            return await receive()
+
+        await self.inner_app(scope, replay_body, send)
+
+
+app.add_middleware(RequestSecurityMiddleware)
+
+
 def get_router() -> QueryRouter:
     """Returns singleton QueryRouter instance."""
     global router_instance
@@ -68,7 +183,9 @@ def get_router() -> QueryRouter:
 # Request & Response Models
 # -----------------------------------------------------------------------------
 class ChatRequest(BaseModel):
-    question: str = Field(..., description="User's natural language question")
+    question: str = Field(
+        ..., min_length=1, max_length=4_000, description="User's natural language question"
+    )
 
 
 class SourceCitation(BaseModel):
@@ -79,7 +196,7 @@ class SourceCitation(BaseModel):
 
 class ChatResponse(BaseModel):
     answer: str
-    sources: list[SourceCitation] = []
+    sources: list[SourceCitation] = Field(default_factory=list)
     retrieval_type: str
     role: str
     status: str = "success"
@@ -103,8 +220,15 @@ def login(request: LoginRequest) -> TokenResponse:
     """
     Authenticate demo user credentials and return role-tagged JWT access token.
     """
+    if not settings.demo_auth_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Password login is not configured.",
+        )
+
     user_info = DEMO_USERS.get(request.username.lower())
-    if not user_info or user_info["password"] != request.password:
+    password_matches = hmac.compare_digest(request.password, settings.demo_auth_password)
+    if not user_info or not password_matches:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid username or password.",
@@ -232,5 +356,10 @@ def _traced_chat_request(
 if __name__ == "__main__":
     import uvicorn
 
-    console.print("🌐 Starting MediBot FastAPI Backend Server on [cyan]http://localhost:8000[/cyan]")
-    uvicorn.run("src.api.main:app", host="0.0.0.0", port=8000, reload=True)
+    console.print(f"🌐 Starting MediBot FastAPI Backend Server on [cyan]{settings.api_host}:{settings.api_port}[/cyan]")
+    uvicorn.run(
+        "src.api.main:app",
+        host=settings.api_host,
+        port=settings.api_port,
+        reload=settings.app_env == "development",
+    )
